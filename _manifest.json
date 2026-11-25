@@ -1,0 +1,37 @@
+{
+  "manifest_version": 2,
+  "id": "github.yunshanluan0714.social-shield",
+  "version": "1.0.0",
+  "plugin_type": "management",
+  "name": "群气氛避雷、反图灵、隐私防火墙与风控熔断",
+  "description": "面向原生 MaiBot 的社交安全与拟人防线：提供群气氛温度计与高危敏感装死、动态关系与杠精冷处理、人设中立的抗提示词注入与硬核题降智、跨群与私聊双重信息防火墙（含 query_memory 群聊隔离锁定）、OOC/Bot 互搏熔断以及单群风控频控。",
+  "author": {
+    "name": "yunshanluan0714",
+    "url": "https://github.com/yunshanluan0714"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/yunshanluan0714/maibot-social-shield",
+    "homepage": "https://github.com/yunshanluan0714/maibot-social-shield",
+    "documentation": "https://github.com/yunshanluan0714/maibot-social-shield/blob/main/README.md",
+    "issues": "https://github.com/yunshanluan0714/maibot-social-shield/issues"
+  },
+  "host_application": {
+    "min_version": "1.3.19",
+    "max_version": "1.4.99"
+  },
+  "sdk": {
+    "min_version": "2.20.0",
+    "max_version": "2.30.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "config.get"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
+}
