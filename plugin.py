@@ -14,13 +14,24 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 from .atmosphere_guard import AtmosphereMonitor
 from .config import SocialShieldConfig
 from .defense_guard import evaluate_defense
-from .ooc_antibot import OOCAndAntiBotMonitor
+from .ooc_antibot import OOCAndAntiBotMonitor, is_system_notification_text
 from .privacy_firewall import FIREWALL_REMINDER, lock_group_query_memory_calls
 from .relationship import RelationshipStore
 from .risk_guard import OutboundRiskGuard
 
 _ATTR_RE = re.compile(r'(\w+)="([^"]*)"')
 _HEADER_RE = re.compile(r"^\s*<message\b([^>]*)>", re.S)
+
+
+def _extract_components(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = msg.get("raw_message")
+    if isinstance(raw, list):
+        return [c for c in raw if isinstance(c, dict)]
+    if isinstance(raw, dict):
+        comps = raw.get("components")
+        if isinstance(comps, list):
+            return [c for c in comps if isinstance(c, dict)]
+    return []
 
 
 def _extract_last_user_from_items(items: list[dict[str, Any]]) -> tuple[str, str, str]:
@@ -78,6 +89,7 @@ class SocialShieldPlugin(MaiBotPlugin):
         self._bot_nickname = ""
         self._bot_aliases: list[str] = []
         self._recent_senders: dict[str, tuple[str, str]] = {}
+        self._session_to_group: dict[str, str] = {}
 
     async def on_load(self) -> None:
         self._relation_store = RelationshipStore(
@@ -87,6 +99,7 @@ class SocialShieldPlugin(MaiBotPlugin):
         )
         self._apply_config_to_engines()
         await self._refresh_bot_identity()
+        await self._warm_stream_mappings()
         self._running = True
         self.ctx.logger.info("群气氛避雷、反图灵、隐私防火墙与风控熔断插件已加载")
 
@@ -133,6 +146,38 @@ class SocialShieldPlugin(MaiBotPlugin):
         except Exception:
             pass
 
+    async def _warm_stream_mappings(self) -> None:
+        try:
+            getter = getattr(self.ctx.chat, "get_all_streams", None) or getattr(self.ctx.chat, "get_group_streams", None)
+            if getter is None:
+                return
+            raw = await getter(platform="qq")
+            streams = raw.get("streams", []) if isinstance(raw, dict) else (raw if isinstance(raw, list) else [])
+            if not isinstance(streams, list):
+                return
+            for st in streams:
+                if not isinstance(st, dict):
+                    continue
+                sid = str(st.get("session_id") or st.get("stream_id") or "").strip()
+                if not sid:
+                    continue
+                gid = str(st.get("group_id") or "").strip()
+                if st.get("is_group_session") or st.get("chat_type") == "group" or gid:
+                    if gid:
+                        self._session_to_group[sid] = gid
+                else:
+                    self._session_to_group.setdefault(sid, "")
+        except Exception:
+            pass
+
+    def _resolve_group_id(self, session_id: str) -> str:
+        sid = str(session_id or "").strip()
+        if sid in self._session_to_group:
+            return self._session_to_group[sid]
+        if ":group:" in sid:
+            return sid.split(":group:")[-1]
+        return ""
+
     @HookHandler(
         "chat.receive.after_process",
         name="social_shield_receive_observe",
@@ -165,8 +210,10 @@ class SocialShieldPlugin(MaiBotPlugin):
 
         plain_text = str(msg.get("processed_plain_text") or "").strip()
         now_ts = time.time()
-        if session_id and user_id:
-            self._recent_senders[session_id] = (user_id, sender_name)
+        if session_id:
+            self._session_to_group[session_id] = group_id
+            if user_id:
+                self._recent_senders[session_id] = (user_id, sender_name)
 
         if group_id and self.config.atmosphere.enabled:
             self._atmosphere.observe(session_id, user_id, plain_text, now_ts=now_ts)
@@ -205,8 +252,8 @@ class SocialShieldPlugin(MaiBotPlugin):
             return unchanged
 
         session_id = str(kwargs.get("session_id") or "").strip()
-        is_group = ":group:" in session_id
-        group_id = session_id.split(":group:")[-1] if is_group else ""
+        group_id = self._resolve_group_id(session_id)
+        is_group = bool(group_id)
         _, latest_text, latest_uid = _extract_last_user_from_items(items)
         if not latest_uid and session_id in self._recent_senders:
             latest_uid, _ = self._recent_senders[session_id]
@@ -268,7 +315,7 @@ class SocialShieldPlugin(MaiBotPlugin):
             return unchanged
 
         session_id = str(kwargs.get("session_id") or "").strip()
-        is_group = ":group:" in session_id
+        is_group = bool(self._resolve_group_id(session_id))
         output_items = kwargs.get("output_items")
         if not is_group or not isinstance(output_items, list):
             return unchanged
@@ -303,7 +350,12 @@ class SocialShieldPlugin(MaiBotPlugin):
         group_info = msg_info.get("group_info") if isinstance(msg_info.get("group_info"), dict) else None
         is_group = group_info is not None
         stream_id = str(msg.get("session_id") or (group_info.get("group_id") if group_info else "") or "").strip()
+        if stream_id:
+            self._session_to_group[stream_id] = str(group_info.get("group_id") or "").strip() if group_info else ""
         text = str(msg.get("processed_plain_text") or "")
+
+        if is_system_notification_text(text):
+            return unchanged
 
         if is_group and self.config.atmosphere.enabled and self._atmosphere.is_in_sensitive_silence(stream_id):
             self.ctx.logger.warning("气氛避雷拦截出站消息: stream=%s", stream_id)
@@ -316,10 +368,9 @@ class SocialShieldPlugin(MaiBotPlugin):
                 return {"action": "abort"}
 
         if self.config.risk_control.enabled:
-            raw_msg = msg.get("raw_message") if isinstance(msg.get("raw_message"), dict) else {}
-            components = raw_msg.get("components") if isinstance(raw_msg.get("components"), list) else []
+            components = _extract_components(msg)
             has_media = any(
-                isinstance(c, dict) and any(k in str(c.get("type") or "").lower() for k in ("image", "emoji", "voice", "video"))
+                any(k in str(c.get("type") or "").lower() for k in ("image", "emoji", "voice", "video", "record"))
                 for c in components
             )
             decision = self._risk_guard.check_outbound(
@@ -351,7 +402,7 @@ class SocialShieldPlugin(MaiBotPlugin):
             return
         session_id = str(msg.get("session_id") or "").strip()
         text = str(msg.get("processed_plain_text") or "").strip()
-        if session_id and self.config.ooc_antibot.enabled:
+        if session_id and self.config.ooc_antibot.enabled and not is_system_notification_text(text):
             self._ooc_antibot.record_outbound(session_id, text)
 
 

@@ -6,7 +6,7 @@ import unittest
 
 from atmosphere_guard import AtmosphereMonitor
 from defense_guard import evaluate_defense
-from ooc_antibot import OOCAndAntiBotMonitor
+from ooc_antibot import OOCAndAntiBotMonitor, is_system_notification_text
 from privacy_firewall import lock_group_query_memory_calls
 from relationship import RelationshipStore
 from risk_guard import OutboundRiskGuard
@@ -52,6 +52,12 @@ class SocialShieldTests(unittest.TestCase):
             t += 4
         self.assertEqual(oob.observe_incoming("g2", "bot2", now_ts=t).reason, "pingpong_bot_loop")
         self.assertEqual(oob.check_outbound("g3", "作为一个AI，希望对您有所帮助").reason, "ooc_cliche_blocked")
+
+        self.assertTrue(is_system_notification_text("【防撤回提醒】 来源：群聊 某群 内容：test"))
+        for idx in range(4):
+            note = f"【防撤回提醒】 来源：群聊 某群 (1000) 发送者：某人 时间：17:49:0{idx} 内容：第{idx}句"
+            self.assertFalse(oob.check_outbound("p_md5", note, now_ts=10.0 + idx).blocked)
+            oob.record_outbound("p_md5", note, now_ts=10.0 + idx)
 
         guard = OutboundRiskGuard(max_group_msgs_per_minute=2, max_group_media_per_minute=1, sensitive_words=["敏感词"])
         self.assertFalse(guard.check_outbound(stream_id="g1", is_group=True, text="这是敏感词", has_media=False).allowed)

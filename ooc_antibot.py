@@ -14,6 +14,15 @@ _OOC_PATTERNS = (
     re.compile(r"您说得太对了|感谢您的提问|祝您生活愉快", re.I),
     re.compile(r"首先[，,].{4,}其次[，,].{4,}(?:最后|综上所述)[，,]", re.S),
 )
+_SYSTEM_NOTICE_RE = re.compile(
+    r"^(?:【[^】]{1,20}(?:提醒|通知|播报|报告|告警|警告|状态|结果|防撤回)】|\[系统通知\])"
+)
+
+
+def is_system_notification_text(text: str) -> bool:
+    """Identify structured plugin/system notifications (e.g. anti-recall) so OOC never blocks them."""
+    clean = str(text or "").strip()
+    return bool(clean and _SYSTEM_NOTICE_RE.match(clean))
 
 
 @dataclass(frozen=True)
@@ -127,21 +136,21 @@ class OOCAndAntiBotMonitor:
         return MonitorDecision(blocked=False)
 
     def check_outbound(self, session_id: str, text: str, now_ts: float | None = None) -> MonitorDecision:
+        clean = str(text or "").strip()
+        if not clean or is_system_notification_text(clean):
+            return MonitorDecision(blocked=False)
+
         now = float(now_ts if now_ts is not None else time.time())
         state = self.check_session_state(session_id, now_ts=now)
         if state.blocked:
             return state
-
-        clean = str(text or "").strip()
-        if not clean:
-            return MonitorDecision(blocked=False)
 
         if any(rx.search(clean) for rx in _OOC_PATTERNS):
             self._session_cooldown_until[session_id] = (now + 180.0, "ooc_cliche_blocked")
             return MonitorDecision(blocked=True, reason="ooc_cliche_blocked")
 
         history = self._bot_replies.get(session_id)
-        if history and len(clean) >= 6:
+        if history and len(clean) >= 10:
             sim_hits = sum(1 for prev in list(history)[-3:] if jaccard_similarity(clean, prev) >= 0.72)
             if sim_hits >= 2:
                 self._session_cooldown_until[session_id] = (now + 300.0, "ooc_repetition_loop")
@@ -153,7 +162,9 @@ class OOCAndAntiBotMonitor:
         now = float(now_ts if now_ts is not None else time.time())
         if not session_id:
             return
-        self._turns.setdefault(session_id, deque(maxlen=20)).append(("__bot__", True, now))
         clean = str(text or "").strip()
+        if is_system_notification_text(clean):
+            return
+        self._turns.setdefault(session_id, deque(maxlen=20)).append(("__bot__", True, now))
         if clean:
             self._bot_replies.setdefault(session_id, deque(maxlen=6)).append(clean)
