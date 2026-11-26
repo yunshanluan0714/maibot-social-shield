@@ -25,11 +25,14 @@ def lock_group_query_memory_calls(output_items: list[Any], *, is_group: bool) ->
             continue
         if str(call.get("func_name") or "").strip() != "query_memory":
             continue
-        args = call.get("arguments")
-        if not isinstance(args, dict):
-            args = {}
-            call["arguments"] = args
-        if args.get("respect_filter") is not True:
-            args["respect_filter"] = True
-            changed = True
+        # The v1.4.8 context snapshot carries "args"; preserve older "arguments" payloads.
+        keys = [key for key in ("args", "arguments") if key in call] or ["args"]
+        for key in keys:
+            args = call.get(key)
+            if not isinstance(args, dict):
+                args = {}
+                call[key] = args
+            if args.get("respect_filter") is not True:
+                args["respect_filter"] = True
+                changed = True
     return updated, changed

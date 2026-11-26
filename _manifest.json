@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.yunshanluan0714.social-shield",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "plugin_type": "management",
   "name": "OOC 熔断、防 Bot 互搏与单群风控防火墙",
   "description": "面向原生 MaiBot 的轻量硬风控插件（常态 0 Prompt 干扰）：提供 OOC 客服腔/复读熔断、双 Bot 无限互搏冷却、单群出站文本与图片限流、自定义敏感词/正则拦截，以及零补丁群聊 query_memory 跨群记忆隔离防火墙。",

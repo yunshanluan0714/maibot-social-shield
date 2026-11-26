@@ -1,4 +1,4 @@
-"""Main plugin wiring for github.yunshanluan0714.social-shield v2.0.0."""
+"""Main plugin wiring for github.yunshanluan0714.social-shield v2.0.1."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ class SocialShieldPlugin(MaiBotPlugin):
         await self._refresh_bot_identity()
         await self._warm_stream_mappings()
         self._running = True
-        self.ctx.logger.info("OOC 熔断、防Bot互搏与单群风控防火墙 v2.0.0 已加载")
+        self.ctx.logger.info("OOC 熔断、防Bot互搏与单群风控防火墙 v2.0.1 已加载")
 
     async def on_unload(self) -> None:
         self._running = False
@@ -118,7 +118,7 @@ class SocialShieldPlugin(MaiBotPlugin):
                 if st.get("is_group_session") or st.get("chat_type") == "group" or gid:
                     if gid:
                         self._session_to_group[sid] = gid
-                else:
+                elif st.get("is_group_session") is False or st.get("chat_type") == "private":
                     self._session_to_group.setdefault(sid, "")
         except Exception:
             pass
@@ -130,6 +130,15 @@ class SocialShieldPlugin(MaiBotPlugin):
         if ":group:" in sid:
             return sid.split(":group:")[-1]
         return ""
+
+    def _record_message_scope(self, session_id: str, info: dict[str, Any]) -> None:
+        if not session_id:
+            return
+        group = info.get("group_info")
+        if isinstance(group, dict) and group.get("group_id"):
+            self._session_to_group[session_id] = str(group["group_id"]).strip()
+        elif "group_info" in info and group is None and isinstance(info.get("user_info"), dict):
+            self._session_to_group.setdefault(session_id, "")
 
     @HookHandler(
         "chat.receive.after_process",
@@ -153,15 +162,14 @@ class SocialShieldPlugin(MaiBotPlugin):
         user_id = str(user_info.get("user_id") or "").strip()
         group_id = str(group_info.get("group_id") or "").strip() if group_info else ""
         session_id = str(msg.get("session_id") or "").strip()
-        platform = str(msg_info.get("platform") or "qq").strip()
+        platform = str(msg.get("platform") or msg_info.get("platform") or "qq").strip()
         if not session_id and platform:
             session_id = f"{platform}:{'group:' + group_id if group_id else 'user:' + user_id}"
 
         if self._bot_account and user_id == self._bot_account:
             return
 
-        if session_id:
-            self._session_to_group[session_id] = group_id
+        self._record_message_scope(session_id, msg_info)
 
         if group_id and self.config.ooc_antibot.enabled and user_id:
             self._ooc_antibot.observe_incoming(session_id, user_id, now_ts=time.time())
@@ -222,9 +230,10 @@ class SocialShieldPlugin(MaiBotPlugin):
             return unchanged
 
         session_id = str(kwargs.get("session_id") or "").strip()
-        is_group = bool(self._resolve_group_id(session_id))
+        known_private = (self._session_to_group[session_id] == "" if session_id in self._session_to_group
+                         else ":user:" in session_id and ":group:" not in session_id)
         output_items = kwargs.get("output_items")
-        if not is_group or not isinstance(output_items, list):
+        if known_private or not isinstance(output_items, list):
             return unchanged
 
         locked, changed = lock_group_query_memory_calls(output_items, is_group=True)
@@ -257,8 +266,7 @@ class SocialShieldPlugin(MaiBotPlugin):
         group_info = msg_info.get("group_info") if isinstance(msg_info.get("group_info"), dict) else None
         is_group = group_info is not None
         stream_id = str(msg.get("session_id") or (group_info.get("group_id") if group_info else "") or "").strip()
-        if stream_id:
-            self._session_to_group[stream_id] = str(group_info.get("group_id") or "").strip() if group_info else ""
+        self._record_message_scope(stream_id, msg_info)
         text = str(msg.get("processed_plain_text") or "")
 
         if is_system_notification_text(text):
