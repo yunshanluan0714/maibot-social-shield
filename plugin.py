@@ -1,4 +1,4 @@
-"""Main plugin wiring for github.yunshanluan0714.social-shield."""
+"""Main plugin wiring for github.yunshanluan0714.social-shield v2.0.0."""
 
 from __future__ import annotations
 
@@ -11,15 +11,11 @@ from uuid import uuid4
 from maibot_sdk import HookHandler, MaiBotPlugin
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
-from .atmosphere_guard import AtmosphereMonitor
 from .config import SocialShieldConfig
-from .defense_guard import evaluate_defense
 from .ooc_antibot import OOCAndAntiBotMonitor, is_system_notification_text
 from .privacy_firewall import FIREWALL_REMINDER, lock_group_query_memory_calls
-from .relationship import RelationshipStore
 from .risk_guard import OutboundRiskGuard
 
-_ATTR_RE = re.compile(r'(\w+)="([^"]*)"')
 _HEADER_RE = re.compile(r"^\s*<message\b([^>]*)>", re.S)
 
 
@@ -32,28 +28,6 @@ def _extract_components(msg: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(comps, list):
             return [c for c in comps if isinstance(c, dict)]
     return []
-
-
-def _extract_last_user_from_items(items: list[dict[str, Any]]) -> tuple[str, str, str]:
-    for item in reversed(items):
-        if not isinstance(item, dict) or item.get("item_type") != "UserMessageItem":
-            continue
-        texts = [
-            str(p.get("text") or "")
-            for p in item.get("parts") or []
-            if isinstance(p, dict) and p.get("type") == "text"
-        ]
-        if not texts:
-            continue
-        match = _HEADER_RE.match(texts[0])
-        if match is None:
-            continue
-        attrs = dict(_ATTR_RE.findall(match.group(1)))
-        if attrs.get("is_self_message", "").lower() == "true":
-            continue
-        body = "".join([texts[0][match.end() :], *texts[1:]]).strip()
-        return attrs.get("user", "").strip(), body, attrs.get("user_id", "").strip()
-    return "", "", ""
 
 
 def _build_reminder_item(text: str) -> dict[str, Any]:
@@ -76,47 +50,35 @@ def _inject_reminder(items: list[dict[str, Any]], text: str) -> list[dict[str, A
 
 
 class SocialShieldPlugin(MaiBotPlugin):
+    """OOC/防Bot互搏熔断、单群出站风控与跨群记忆隔离防火墙插件。"""
+
     config_model = SocialShieldConfig
 
     def __init__(self) -> None:
         super().__init__()
         self._running = False
-        self._relation_store: RelationshipStore | None = None
-        self._atmosphere = AtmosphereMonitor()
         self._ooc_antibot = OOCAndAntiBotMonitor()
         self._risk_guard = OutboundRiskGuard()
         self._bot_account = ""
-        self._bot_nickname = ""
-        self._bot_aliases: list[str] = []
-        self._recent_senders: dict[str, tuple[str, str]] = {}
         self._session_to_group: dict[str, str] = {}
 
     async def on_load(self) -> None:
-        self._relation_store = RelationshipStore(
-            self.ctx.paths.data_dir,
-            troll_threshold=self.config.relationship.troll_threshold,
-            close_friend_threshold=self.config.relationship.close_friend_threshold,
-        )
         self._apply_config_to_engines()
         await self._refresh_bot_identity()
         await self._warm_stream_mappings()
         self._running = True
-        self.ctx.logger.info("群气氛避雷、反图灵、隐私防火墙与风控熔断插件已加载")
+        self.ctx.logger.info("OOC 熔断、防Bot互搏与单群风控防火墙 v2.0.0 已加载")
 
     async def on_unload(self) -> None:
         self._running = False
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
+        del scope, config_data, version
         self._apply_config_to_engines()
         await self._refresh_bot_identity()
 
     def _apply_config_to_engines(self) -> None:
         cfg = self.config
-        self._atmosphere.update_rules(
-            sensitive_cooldown_minutes=cfg.atmosphere.sensitive_cooldown_minutes,
-            extra_sensitive_words=cfg.atmosphere.extra_sensitive_words,
-            extra_sensitive_regex=cfg.atmosphere.extra_sensitive_regex,
-        )
         self._ooc_antibot.update_config(
             bot_pingpong_threshold=cfg.ooc_antibot.bot_pingpong_threshold,
             bot_cooldown_minutes=cfg.ooc_antibot.bot_cooldown_minutes,
@@ -128,21 +90,12 @@ class SocialShieldPlugin(MaiBotPlugin):
             sensitive_words=cfg.risk_control.sensitive_words,
             sensitive_regex=cfg.risk_control.sensitive_regex,
         )
-        if self._relation_store is not None:
-            self._relation_store.troll_threshold = cfg.relationship.troll_threshold
-            self._relation_store.close_friend_threshold = cfg.relationship.close_friend_threshold
 
     async def _refresh_bot_identity(self) -> None:
         try:
             qq = await self.ctx.config.get("bot.qq_account", "")
-            nick = await self.ctx.config.get("bot.nickname", "")
-            aliases = await self.ctx.config.get("bot.alias_names", [])
             if isinstance(qq, str):
                 self._bot_account = qq.strip()
-            if isinstance(nick, str):
-                self._bot_nickname = nick.strip()
-            if isinstance(aliases, list):
-                self._bot_aliases = [str(a).strip() for a in aliases if str(a).strip()]
         except Exception:
             pass
 
@@ -181,7 +134,7 @@ class SocialShieldPlugin(MaiBotPlugin):
     @HookHandler(
         "chat.receive.after_process",
         name="social_shield_receive_observe",
-        description="观察群气氛场域、动态关系分与防Bot互搏轨迹",
+        description="维护会话映射并观测防 Bot 互搏对话轨迹",
         mode=HookMode.OBSERVE,
         order=HookOrder.NORMAL,
         timeout_ms=2000,
@@ -198,7 +151,6 @@ class SocialShieldPlugin(MaiBotPlugin):
         user_info = msg_info.get("user_info") if isinstance(msg_info.get("user_info"), dict) else {}
         group_info = msg_info.get("group_info") if isinstance(msg_info.get("group_info"), dict) else None
         user_id = str(user_info.get("user_id") or "").strip()
-        sender_name = str(user_info.get("user_cardname") or user_info.get("user_nickname") or user_id).strip()
         group_id = str(group_info.get("group_id") or "").strip() if group_info else ""
         session_id = str(msg.get("session_id") or "").strip()
         platform = str(msg_info.get("platform") or "qq").strip()
@@ -208,39 +160,19 @@ class SocialShieldPlugin(MaiBotPlugin):
         if self._bot_account and user_id == self._bot_account:
             return
 
-        plain_text = str(msg.get("processed_plain_text") or "").strip()
-        now_ts = time.time()
         if session_id:
             self._session_to_group[session_id] = group_id
-            if user_id:
-                self._recent_senders[session_id] = (user_id, sender_name)
-
-        if group_id and self.config.atmosphere.enabled:
-            self._atmosphere.observe(session_id, user_id, plain_text, now_ts=now_ts)
 
         if group_id and self.config.ooc_antibot.enabled and user_id:
-            self._ooc_antibot.observe_incoming(session_id, user_id, now_ts=now_ts)
-
-        if self.config.relationship.enabled and self._relation_store is not None and user_id:
-            aliases = [x for x in [self._bot_nickname, *self._bot_aliases] if x]
-            mentioned = any(a.lower() in plain_text.lower() for a in aliases)
-            scope = f"group:{group_id}" if group_id else "private"
-            self._relation_store.observe_message(
-                scope=scope,
-                user_id=user_id,
-                display_name=sender_name,
-                text=plain_text,
-                mentioned_bot=mentioned,
-                now_ts=now_ts,
-            )
+            self._ooc_antibot.observe_incoming(session_id, user_id, now_ts=time.time())
 
     @HookHandler(
         "maisaka.planner.before_request",
         name="social_shield_planner_inject",
-        description="按需注入群气氛避雷、动态关系、反图灵降智、跨群隐私防火墙及防互搏冷却提醒",
+        description="仅在熔断冷却期或显式开启防火墙提醒时注入最小提示（常态零注入）",
         mode=HookMode.BLOCKING,
         order=HookOrder.NORMAL,
-        timeout_ms=2000,
+        timeout_ms=1500,
         error_policy=ErrorPolicy.SKIP,
     )
     async def on_planner_before_request(self, **kwargs: Any) -> dict[str, Any]:
@@ -252,41 +184,16 @@ class SocialShieldPlugin(MaiBotPlugin):
             return unchanged
 
         session_id = str(kwargs.get("session_id") or "").strip()
-        group_id = self._resolve_group_id(session_id)
-        is_group = bool(group_id)
-        _, latest_text, latest_uid = _extract_last_user_from_items(items)
-        if not latest_uid and session_id in self._recent_senders:
-            latest_uid, _ = self._recent_senders[session_id]
-
+        is_group = bool(self._resolve_group_id(session_id))
         hints: list[str] = []
-        if is_group and self.config.atmosphere.enabled:
-            atm = self._atmosphere.evaluate(session_id)
-            if atm.hint:
-                hints.append(atm.hint)
 
         if self.config.ooc_antibot.enabled:
             oob = self._ooc_antibot.check_session_state(session_id)
             if oob.hint:
                 hints.append(oob.hint)
 
-        if is_group and self.config.privacy_firewall.enabled:
+        if is_group and self.config.privacy_firewall.enabled and self.config.privacy_firewall.inject_prompt_reminder:
             hints.append(FIREWALL_REMINDER)
-
-        if self.config.relationship.enabled and self._relation_store is not None and latest_uid:
-            scope = f"group:{group_id}" if group_id else "private"
-            r_hint = self._relation_store.build_hint(scope=scope, user_id=latest_uid)
-            if r_hint:
-                hints.append(r_hint)
-
-        if self.config.defense.enabled and latest_text:
-            _, d_hint = evaluate_defense(
-                latest_text,
-                anti_injection=self.config.defense.anti_injection,
-                capability_downgrade=self.config.defense.capability_downgrade,
-                bypass_keywords=self.config.defense.bypass_keywords,
-            )
-            if d_hint:
-                hints.append(d_hint)
 
         if not hints:
             return unchanged
@@ -298,7 +205,7 @@ class SocialShieldPlugin(MaiBotPlugin):
     @HookHandler(
         "maisaka.planner.after_response",
         name="social_shield_memory_firewall",
-        description="群聊场景下强制锁定 query_memory 的 respect_filter=True，防止检索私聊记忆",
+        description="群聊场景下强制锁定 query_memory 的 respect_filter=True，防止检索私聊或他群记忆",
         mode=HookMode.BLOCKING,
         order=HookOrder.EARLY,
         timeout_ms=1500,
@@ -331,7 +238,7 @@ class SocialShieldPlugin(MaiBotPlugin):
     @HookHandler(
         "send_service.before_send",
         name="social_shield_risk_before_send",
-        description="执行高危气氛装死拦截、OOC/Bot互搏熔断以及单群风控频控",
+        description="执行 OOC/Bot 互搏熔断以及单群出站风控限流与敏感词拦截",
         mode=HookMode.BLOCKING,
         order=HookOrder.EARLY,
         timeout_ms=2000,
@@ -356,10 +263,6 @@ class SocialShieldPlugin(MaiBotPlugin):
 
         if is_system_notification_text(text):
             return unchanged
-
-        if is_group and self.config.atmosphere.enabled and self._atmosphere.is_in_sensitive_silence(stream_id):
-            self.ctx.logger.warning("气氛避雷拦截出站消息: stream=%s", stream_id)
-            return {"action": "abort"}
 
         if self.config.ooc_antibot.enabled:
             oob = self._ooc_antibot.check_outbound(stream_id, text)
